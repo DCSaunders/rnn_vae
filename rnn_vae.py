@@ -7,49 +7,20 @@ import matplotlib.pyplot as plt
 import tensorflow as tf
 import re
 import subprocess
+import sys
 from vae import VAE
+from data_utils import constants, data_utils
 FLAGS = None
-
-class constants(object):
-  PAD_ID = 0
-  GO_ID = 1
-  EOS_ID = 2
-  dev_out = 'dev_out'
-  bleu_script = "/home/mifs/ds636/code/scripts/multi-bleu.perl"
 
 class config(object):
   seq_len = 40
   batch_size = 20
-  n_hidden = 30
-  n_latent = 10
-  max_iter = 500
-  dev_eval_iter = 100
+  n_hidden = 150
+  n_latent = 30
+  max_iter = 10000
+  vocab_size = 14467
+  dev_eval_iter = 500
   kl_weight_rate = 1/10
-
-
-
-def get_batch(vae, seqs_seq_lens):
-  input_feed = {}
-  enc_input_data = []
-  seq_len = []
-  loss_weights = np.ones((vae.seq_len + 1, vae.batch_size))
-  for seq in range(vae.batch_size):
-    enc_input_data.append(np.pad(r, (0, vae.seq_len - rand_len), 'constant'))
-    seq_len.append(rand_len)
-    loss_weights[rand_len:, seq] = 0
-
-  enc_input_data = np.array(enc_input_data)
-  dec_input_data = np.array([[constants.GO_ID] + list(seq) for seq in enc_input_data])
-  target_data = [dec_in[1:] for dec_in in vae.dec_inputs]
-
-  for l in range(vae.seq_len):
-    input_feed[vae.enc_inputs[l].name] = enc_input_data[:, l]
-  for l in range(vae.seq_len + 1):
-    input_feed[vae.dec_inputs[l].name] = dec_input_data[:, l]
-    input_feed[vae.loss_weights[l].name] = loss_weights[l, :]
-  input_feed[vae.targets[-1].name] = np.zeros(vae.batch_size)
-  input_feed[vae.seq_len.name] = np.array(seq_len)
-  return input_feed, enc_input_data
 
 
 def plot_loss(kl_loss, xentropy):
@@ -63,10 +34,12 @@ def plot_loss(kl_loss, xentropy):
   else:
     plt.show()
 
+
 def save_model(sess, saver, name=''):
   if FLAGS.save_dir:
-    fname = '{}/model.ckpt{}'.format(name)
-    saver.save(sess, FLAGS.save_dir + '/model.ckpt')
+    fname = '{}/model.ckpt{}'.format(FLAGS.save_dir, name)
+    saver.save(sess, fname)
+
 
 def bleu_eval(vae, dev_feed, sess, saver, best_bleu):
   dev_out = sess.run(vae.test_output, dev_feed)
@@ -86,6 +59,8 @@ def bleu_eval(vae, dev_feed, sess, saver, best_bleu):
     return 0.0
 
 def save_batch(data, fname):
+  if FLAGS.save_dir:
+    fname = FLAGS.save_dir + fname
   with open(fname, 'w') as f_out:
     for out in data:
       out = out.astype(int).tolist()
@@ -95,7 +70,8 @@ def save_batch(data, fname):
         pass
       f_out.write('{}\n'.format(' '.join(map(str, out))))    
    
-def read_data(f_idx):
+
+def read_data(f_idx, utils):
   seq_list = []
   seq_len_list = []
   with open(f_idx, 'r') as f_in:
@@ -104,17 +80,54 @@ def read_data(f_idx):
       seq_len = len(seq) + 1 # account for EOS_ID
       if seq_len <= config.seq_len:
         seq_len_list.append(seq_len)
-        seq_list.append(seq + [constants.EOS_ID] + (config.seq_len - seq_len) * [constants.PAD_ID])
+        seq_unk_replace = [w if w <= config.vocab_size else utils.UNK_ID for w in seq]
+        seq_list.append(
+          seq_unk_replace + [constants.EOS_ID] + (config.seq_len - seq_len) * [utils.PAD_ID])
   logging.info('Read {} sequences from {}'.format(len(seq_list), f_idx))
-  return zip(seq_list, seq_len_list)
+  return seq_list, seq_len_list
+
+
+def get_batch(vae, seq_data, seq_lens, batch_idx=0):
+  input_feed = {}
+  enc_input_data = []
+  seq_len = []
+  loss_weights = np.ones((vae.seq_len + 1, vae.batch_size))
+  for seq_id in range(batch_idx * vae.batch_size, (batch_idx + 1) * vae.batch_size):
+    seq_id = seq_id % len(seq_data)
+    enc_input_data.append(seq_data[seq_id])
+    seq_len.append(seq_lens[seq_id])
+    loss_weights[seq_lens[seq_id]:, len(enc_input_data) - 1] = 0
+
+  enc_input_data = np.array(enc_input_data)
+  dec_input_data = np.array([[constants.GO_ID] + list(seq) for seq in enc_input_data])
+  target_data = [dec_in[1:] for dec_in in vae.dec_inputs]
+
+  for l in range(vae.seq_len):
+    input_feed[vae.enc_inputs[l].name] = enc_input_data[:, l]
+  for l in range(vae.seq_len + 1):
+    input_feed[vae.dec_inputs[l].name] = dec_input_data[:, l]
+    input_feed[vae.loss_weights[l].name] = loss_weights[l, :]
+  input_feed[vae.targets[-1].name] = np.zeros(vae.batch_size)
+  input_feed[vae.sequence_lengths.name] = np.array(seq_len)
+  return input_feed, enc_input_data
+
+def get_utils():
+  utils = data_utils()
+  if FLAGS.no_zero_pad:
+    utils.no_zero_pad()
+  if FLAGS.swap_unk is not None:
+    utils.swap_unk(FLAGS.swap_unk)
+  
+  return utils
 
 def main(_):
   best_dev_bleu = 0.0
-  train_seqs = read_data(FLAGS.train_idx)
-  dev_seqs = read_data(FLAGS.dev_idx)
-  test_seqs = read_data(FLAGS.test_idx)
+  utils = get_utils()
+  train_seqs, train_seq_lens = read_data(FLAGS.train_idx, utils)
+  dev_seqs, dev_seq_lens = read_data(FLAGS.dev_idx, utils)
+  test_seqs, test_seq_lens = read_data(FLAGS.test_idx, utils)
 
-  cell = tf.nn.rnn_cell.LSTMCell(n_hidden)
+  cell = tf.nn.rnn_cell.LSTMCell(config.n_hidden)
   vae = VAE(config.batch_size,
             config.seq_len,
             config.n_hidden,
@@ -123,7 +136,7 @@ def main(_):
             annealing=FLAGS.annealing)
   loss_hist = {'kl': [], 'xentropy': []}
   saver = tf.train.Saver()
-  dev_feed, _ = get_batch(vae, dev_seqs)
+  dev_feed, _ = get_batch(vae, dev_seqs, dev_seq_lens)
 
   with tf.Session() as sess:
     if FLAGS.load_model:
@@ -134,7 +147,7 @@ def main(_):
     for i in range(config.max_iter):
       if FLAGS.annealing:
         vae.kl_weight = 1 - np.exp(-i * config.kl_weight_rate)
-      input_feed, _ = get_batch(vae, train_seqs)
+      input_feed, _ = get_batch(vae, train_seqs, train_seq_lens, batch_idx=i)
 
       if FLAGS.plot_loss:
         _, kl_loss, xentropy_loss = sess.run([vae.train, vae.kl_loss, vae.xentropy_loss], input_feed)
@@ -152,7 +165,7 @@ def main(_):
     if FLAGS.plot_loss:
       plot_loss(loss_hist['kl'], loss_hist['xentropy'])
 
-    input_feed, input_data = get_batch(vae, test_seqs)
+    input_feed, input_data = get_batch(vae, test_seqs, test_seq_lens)
     output = sess.run(vae.test_output, input_feed)
     for in_, out_ in zip(input_data, output):
       if constants.EOS_ID in out_:
@@ -164,7 +177,7 @@ def main(_):
     for out in gen_out:
       logging.info(out[:list(out).index(constants.EOS_ID)])
     '''
-    save_model(sess, saver)
+    save_model(sess, saver, name='final')
 
 
 if __name__ == '__main__':
@@ -185,9 +198,14 @@ if __name__ == '__main__':
                       help='Set if plotting encoder/decoder loss over time')
   parser.add_argument('--annealing', default=False, action='store_true',
                       help='Set if initially not weighting KL loss')
+  parser.add_argument('--no_zero_pad', default=False, action='store_true',
+                      help='Set if using UNK_ID=0 and PAD_ID=EOS_ID, instead of PAD_ID=0, UNK_ID=3')
+  parser.add_argument('--swap_unk', default=None, type=int,
+                      help='Set with value for UNK token to take (e.g. for premapped data)')
   parser.add_argument('--decoder_dropout', type=float, default=1.0, 
                       help='Proportion of input to replace with dummy value on decoder input')
   FLAGS = parser.parse_args()
+  logging.basicConfig(stream=sys.stdout, level=logging.INFO)
   tf.set_random_seed(1234)
   np.random.seed(1234)
   tf.app.run()

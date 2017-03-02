@@ -1,7 +1,7 @@
 from __future__ import division
 import tensorflow as tf
 import numpy as np
-from rnn_vae import constants
+from data_utils import constants
 from tensorflow.python.ops import rnn
 
 
@@ -21,7 +21,7 @@ class VAE(object):
                        for i in range(self.seq_len + 1)]
     self.loss_weights = [tf.placeholder(tf.float32, shape=[None], name="weight{}".format(i))
                        for i in range(self.seq_len + 1)]
-    self.seq_len = tf.placeholder(tf.int32, shape=[self.batch_size], name="seqlen")
+    self.sequence_lengths = tf.placeholder(tf.int32, shape=[self.batch_size], name="seqlen")
     self.targets = [self.dec_inputs[i + 1] for i in range(len(self.dec_inputs) - 1)]
     self.targets.append(tf.placeholder(tf.int32, shape=[None], name="last_target"))
     self.initializer = initializer
@@ -49,7 +49,7 @@ class VAE(object):
       embedded_inputs = [tf.nn.embedding_lookup(embedding, enc_input) 
                          for enc_input in self.enc_inputs]
       _, enc_state = tf.nn.rnn(self._enc_cell, embedded_inputs, dtype=tf.float32,
-                               sequence_length=self.seq_len)
+                               sequence_length=self.sequence_lengths)
 
     self.get_latent(enc_state)
     dec_in_w = tf.Variable(self.initializer([self.n_latent, self._dec_cell.state_size],
