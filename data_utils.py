@@ -13,5 +13,4 @@ class data_utils(object):
 class constants(object):
   GO_ID = 1
   EOS_ID = 2
-  dev_out = 'dev_out'
   bleu_script = "/home/mifs/ds636/code/scripts/multi-bleu.perl"
